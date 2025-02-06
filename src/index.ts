@@ -542,14 +542,14 @@ async function ytSearch(title: string): Promise<string[]> {
 
 const status_idle = () => {
     return new CustomStatus(new Client())
-        .setEmoji('📽')
-        .setState('Watching Something!')
+        .setEmoji('👑')
+        .setState('Join Sinister Valley|+18 Link in Bio!')
 }
 
 const status_watch = (name: string) => {
     return new CustomStatus(new Client())
-        .setEmoji('📽')
-        .setState(`Playing ${name}...`)
+        .setEmoji('🟣')
+        .setState(`Streaming Now!`)
 }
 
 // Funtction to send playing message
