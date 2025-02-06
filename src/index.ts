@@ -543,7 +543,7 @@ async function ytSearch(title: string): Promise<string[]> {
 const status_idle = () => {
     return new CustomStatus(new Client())
         .setEmoji('👑')
-        .setState('Join Sinister Valley|+18 Link in Bio!')
+        .setState('Join Sinister Valley. Link in Bio!')
 }
 
 const status_watch = (name: string) => {
