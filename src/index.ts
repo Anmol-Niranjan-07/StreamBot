@@ -56,10 +56,10 @@ const streamStatus = {
     }
 };
 
-// Global queue (working copy) and original queue (for looping)
+// Global queues: working queue and original queue (for looping)
 let videoQueue: { uid: string, link: string }[] = [];
 let originalQueue: { uid: string, link: string }[] = [];
-let loopEnabled = false; // When true, the originalQueue will be refilled when the working queue is empty
+let loopEnabled = false; // If true, once the working queue is empty, it will be refilled from originalQueue
 
 // Utility: generate a UID (5-digit number + 3 random uppercase letters)
 function generateUID(): string {
@@ -72,7 +72,7 @@ function generateUID(): string {
     return num + randLetters;
 }
 
-// Helper: Send plain text message
+// Helper: Send a plain text message
 async function sendPlain(target: Message | TextChannel, content: string) {
     if (target instanceof Message) {
         await target.reply(content);
@@ -81,7 +81,7 @@ async function sendPlain(target: Message | TextChannel, content: string) {
     }
 }
 
-// Specific helpers
+// Specific helper functions
 async function sendError(message: Message, errorText: string) {
     await sendPlain(message, `❌ Error: ${errorText}`);
 }
@@ -139,7 +139,7 @@ async function preDownloadVideo(link: string): Promise<string> {
                     writeStream.on('error', (err: any) => reject(err));
                 }).on('error', (err: any) => reject(err));
             } else {
-                // Fallback for generic remote URLs
+                // Generic remote URL
                 const fileName = `video_${Date.now()}.mp4`;
                 filePath = path.join(config.videosDir, fileName);
                 https.get(link, (response: any) => {
@@ -163,7 +163,7 @@ streamer.client.on("ready", async () => {
     }
 });
 
-// Voice state update to maintain streamStatus
+// Voice state update: Maintain streamStatus
 streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
     if (oldState.member?.user.id === streamer.client.user?.id && oldState.channelId && !newState.channelId) {
         streamStatus.joined = false;
@@ -180,7 +180,7 @@ streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Command handler (listening to messages from self as well)
+// Command handler (listens to messages from self)
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
@@ -189,7 +189,7 @@ streamer.client.on('messageCreate', async (message) => {
 
     switch (commandName) {
         case 'add': {
-            // Use args.join(" ") so spaces are preserved.
+            // Use args.join(" ") so that links with spaces are preserved.
             const link = args.join(" ");
             if (!link) {
                 await sendError(message, "Please provide a video link.");
@@ -300,19 +300,19 @@ streamer.client.on('messageCreate', async (message) => {
 let command: PCancelable<string> | undefined;
 
 async function processQueue() {
-    // If queue is empty and looping is enabled, refill from the original queue.
     if (videoQueue.length === 0 && loopEnabled && originalQueue.length > 0) {
         videoQueue = originalQueue.slice(0);
     }
     if (videoQueue.length > 0) {
         const next = videoQueue.shift()!;
-        // If the next link is remote, pre-download it for smoother playback.
+        // If the link is remote, pre-download it.
         if (next.link.startsWith("http")) {
             try {
                 const localPath = await preDownloadVideo(next.link);
                 next.link = localPath;
             } catch (err) {
                 logger.error("Error pre-downloading video:", err);
+                // If pre-download fails, skip to the next video.
                 return processQueue();
             }
         }
@@ -323,7 +323,6 @@ async function processQueue() {
         streamStatus.joined = true;
         streamStatus.playing = true;
         setImmediate(() => {
-            // Play the (now local) video file.
             playVideo(next.link, udpConn, `Queue item [${next.uid}]`).catch(err => logger.error(err));
         });
     } else {
@@ -352,7 +351,10 @@ async function playVideo(video: string, udpConn: MediaUdp, title?: string) {
         udpConn.mediaConnection.setSpeaking(false);
         udpConn.mediaConnection.setVideoStatus(false);
         sendPlain(getCommandChannel(), "⏹️ Finished playing video.");
-        await processQueue();
+        // Use a short delay before processing the next video.
+        setTimeout(() => {
+            processQueue().catch(err => logger.error(err));
+        }, 1000);
     }
 }
 
