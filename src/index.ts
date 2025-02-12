@@ -1,4 +1,4 @@
-import { Client, TextChannel, CustomStatus, Message, MessageAttachment, ActivityOptions, MessageEmbed } from "discord.js-selfbot-v13";
+import { Client, TextChannel, CustomStatus, Message, ActivityOptions } from "discord.js-selfbot-v13";
 import { streamLivestreamVideo, MediaUdp, StreamOptions, Streamer, Utils } from "@dank074/discord-video-stream";
 import config from "./config.js";
 import fs from 'fs';
@@ -16,7 +16,7 @@ import { TwitchStream } from './@types/index.js';
 const streamer = new Streamer(new Client());
 const youtube = new Youtube();
 
-// Stream options – same as before
+// Define stream options – unchanged from your original logic
 const streamOpts: StreamOptions = {
     width: config.width,
     height: config.height,
@@ -31,19 +31,19 @@ const streamOpts: StreamOptions = {
     forceChacha20Encryption: false
 };
 
-// Create required directories
+// Create necessary directories
 fs.mkdirSync(config.videosDir, { recursive: true });
 fs.mkdirSync(config.previewCacheDir, { recursive: true });
 
-// (Local videos list – used for the random command)
-let videoFiles = fs.readdirSync(config.videosDir);
+// Read local video files
+const videoFiles = fs.readdirSync(config.videosDir);
 let videos = videoFiles.map(file => {
     const fileName = path.parse(file).name;
     return { name: fileName.replace(/ /g, '_'), path: path.join(config.videosDir, file) };
 });
 logger.info(`Available videos:\n${videos.map(m => m.name).join('\n')}`);
 
-// Global stream status – reused mostly as before
+// Global stream status
 const streamStatus = {
     joined: false,
     joinsucc: false,
@@ -55,10 +55,10 @@ const streamStatus = {
     }
 };
 
-// Global queue for links
+// Global queue for video links
 let videoQueue: { uid: string, link: string }[] = [];
 
-// Utility: Generate a UID (5 digits + 3 random letters)
+// Utility: generate a UID (5-digit number + 3 random uppercase letters)
 function generateUID(): string {
     const num = Math.floor(10000 + Math.random() * 90000).toString();
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -69,21 +69,53 @@ function generateUID(): string {
     return num + randLetters;
 }
 
-// Utility: Send an embed message
-async function sendEmbed(target: Message | TextChannel, title: string, description: string, emoji: string) {
-    const embed = new MessageEmbed()
-        .setTitle(`${emoji} ${title}`)
-        .setDescription(description)
-        .setColor('#0099ff')
-        .setTimestamp();
+// Helper: Send a plain text message (if a Message is provided, reply; if a channel, send there)
+async function sendPlain(target: Message | TextChannel, content: string) {
     if (target instanceof Message) {
-        await target.reply({ content: " ", embeds: [embed] });
+        await target.reply(content);
     } else {
-        await target.send({ content: " ", embeds: [embed] });
+        await target.send(content);
     }
 }
 
-// When the client is ready
+// Specific helper functions
+async function sendError(message: Message, errorText: string) {
+    await sendPlain(message, `❌ **Error**: ${errorText}`);
+}
+
+async function sendSuccess(message: Message, text: string) {
+    await sendPlain(message, `✅ **Success**: ${text}`);
+}
+
+async function sendInfo(message: Message, title: string, description: string) {
+    await sendPlain(message, `ℹ️ **${title}**: ${description}`);
+}
+
+async function sendPlaying(message: Message, title: string) {
+    await sendPlain(message, `▶️ **Now Playing**: ${title}`);
+}
+
+async function sendList(message: Message, items: string[], type?: string) {
+    let header = "";
+    if (type === "ytsearch") {
+        header = "📋 **Search Results**:";
+    } else if (type === "refresh") {
+        header = "📋 **Video list refreshed**:";
+    } else {
+        header = "📋 **Local Videos List**:";
+    }
+    await sendPlain(message, `${header}\n${items.join('\n')}`);
+}
+
+// Function to send a finish message to the command channel
+async function sendFinishMessage() {
+    const channel = streamer.client.channels.cache.get(config.cmdChannelId.toString()) as TextChannel;
+    if (channel) {
+        await channel.send("⏹️ **Finished**: Finished playing video.");
+    }
+}
+
+// Ready event
 streamer.client.on("ready", async () => {
     if (streamer.client.user) {
         logger.info(`${streamer.client.user.tag} is ready`);
@@ -91,7 +123,7 @@ streamer.client.on("ready", async () => {
     }
 });
 
-// (Keep voice state update listener so that streamStatus is updated)
+// Voice state update event – updates streamStatus on join/leave
 streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
     if (oldState.member?.user.id === streamer.client.user?.id) {
         if (oldState.channelId && !newState.channelId) {
@@ -116,15 +148,10 @@ streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// ------------------
-// NEW COMMAND HANDLING
-// ------------------
-
-// Listen for all messages (including those from the bot itself) that start with the prefix
+// Message handling – now listens for commands even from the bot itself
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
 
-    // Remove old filtering so commands from the bot account are processed
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (args.length === 0) return;
     const commandName = args.shift()!.toLowerCase();
@@ -134,27 +161,25 @@ streamer.client.on('messageCreate', async (message) => {
             // Usage: <prefix>add <video_link>
             const link = args[0];
             if (!link) {
-                await sendEmbed(message, "Error", "Please provide a video link.", "❌");
+                await sendError(message, "Please provide a video link.");
                 return;
             }
             const uid = generateUID();
             videoQueue.push({ uid, link });
-            await sendEmbed(message, "Video Added", `UID: \`${uid}\`\nLink: ${link}`, "✅");
-            // If nothing is playing, start processing the queue immediately.
+            await sendSuccess(message, `Video Added\nUID: \`${uid}\`\nLink: ${link}`);
+            // If nothing is playing, process the queue
             if (!streamStatus.playing) {
                 processQueue();
             }
             break;
         }
         case 'list': {
-            // Show the current queue status
+            // Show current queue status
             if (videoQueue.length === 0) {
-                await sendEmbed(message, "Queue Status", "The queue is empty.", "ℹ️");
+                await sendInfo(message, "Queue Status", "The queue is empty.");
             } else {
-                const listStr = videoQueue
-                    .map(item => `• \`${item.uid}\`: ${item.link}`)
-                    .join("\n");
-                await sendEmbed(message, "Queue Status", listStr, "📋");
+                const listStr = videoQueue.map(item => `• \`${item.uid}\`: ${item.link}`).join("\n");
+                await sendPlain(message, `📋 **Queue Status**:\n${listStr}`);
             }
             break;
         }
@@ -162,30 +187,29 @@ streamer.client.on('messageCreate', async (message) => {
             // Usage: <prefix>remove <uid>
             const uid = args[0];
             if (!uid) {
-                await sendEmbed(message, "Error", "Please provide the UID of the video to remove.", "❌");
+                await sendError(message, "Please provide the UID of the video to remove.");
                 return;
             }
             const index = videoQueue.findIndex(item => item.uid === uid);
             if (index === -1) {
-                await sendEmbed(message, "Error", `No video found with UID \`${uid}\`.`, "❌");
+                await sendError(message, `No video found with UID \`${uid}\`.`);
             } else {
                 const removed = videoQueue.splice(index, 1)[0];
-                await sendEmbed(message, "Video Removed", `Removed video with UID \`${removed.uid}\` and link:\n${removed.link}`, "✅");
+                await sendSuccess(message, `Removed video with UID \`${removed.uid}\` and link:\n${removed.link}`);
             }
             break;
         }
         case 'random': {
-            // Play a random video from the local videos folder immediately
-            videoFiles = fs.readdirSync(config.videosDir);
-            if (videoFiles.length === 0) {
-                await sendEmbed(message, "Error", "No videos found in the local videos folder.", "❌");
+            // Play a random video from local folder immediately
+            const localVideoFiles = fs.readdirSync(config.videosDir);
+            if (localVideoFiles.length === 0) {
+                await sendError(message, "No videos found in the local videos folder.");
                 return;
             }
-            const randomIndex = Math.floor(Math.random() * videoFiles.length);
-            const file = videoFiles[randomIndex];
+            const randomIndex = Math.floor(Math.random() * localVideoFiles.length);
+            const file = localVideoFiles[randomIndex];
             const filePath = path.join(config.videosDir, file);
-            await sendEmbed(message, "Now Playing", `Playing random video: \`${file}\``, "▶️");
-            // Join and create a stream
+            await sendPlain(message, `▶️ **Now Playing**: Playing random video: \`${file}\``);
             await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
             const udpConn = await streamer.createStream(streamOpts);
             streamStatus.joined = true;
@@ -197,12 +221,11 @@ streamer.client.on('messageCreate', async (message) => {
             // Usage: <prefix>download <video_link>
             const link = args[0];
             if (!link) {
-                await sendEmbed(message, "Error", "Please provide a video link to download.", "❌");
+                await sendError(message, "Please provide a video link to download.");
                 return;
             }
-            // Start the download in background
             downloadVideo(link, message.channel as TextChannel);
-            await sendEmbed(message, "Download Started", `Downloading video from: ${link}`, "⏬");
+            await sendPlain(message, `⏬ **Download Started**: Downloading video from: ${link}`);
             break;
         }
         case 'help': {
@@ -216,11 +239,11 @@ streamer.client.on('messageCreate', async (message) => {
                 `\`${config.prefix}download <link>\` – Download a video to the videos folder in the background.`,
                 `\`${config.prefix}help\` – Show this help message.`
             ].join('\n');
-            await sendEmbed(message, "Help", helpText, "📋");
+            await sendPlain(message, helpText);
             break;
         }
         default: {
-            await sendEmbed(message, "Error", "Invalid command. Use the `help` command to see the list of available commands.", "❌");
+            await sendError(message, "Invalid command. Use the `help` command to see the list of available commands.");
             break;
         }
     }
@@ -232,11 +255,10 @@ streamer.client.on('messageCreate', async (message) => {
 
 let command: PCancelable<string> | undefined;
 
-// This function checks the queue and starts playing the next video if available
+// Process the next video in the queue, if available
 async function processQueue() {
     if (videoQueue.length > 0) {
         const next = videoQueue.shift()!;
-        // Ensure we are joined
         if (!streamStatus.joined) {
             await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
         }
@@ -249,7 +271,7 @@ async function processQueue() {
     }
 }
 
-// Function to play a link (handles YouTube, Twitch, or fallback)
+// Play a link (supports YouTube, Twitch, or a fallback URL)
 async function playLink(link: string, udpConn: MediaUdp, displayName?: string) {
     logger.info(`Started playing link: ${link}`);
     udpConn.mediaConnection.setSpeaking(true);
@@ -265,7 +287,7 @@ async function playLink(link: string, udpConn: MediaUdp, displayName?: string) {
             ]);
             if (yturl) {
                 if (!displayName) displayName = videoInfo.videoDetails.title;
-                await sendEmbed(getCommandChannel(), "Now Playing", `Playing: ${displayName}`, "▶️");
+                await sendPlain(getCommandChannel(), `▶️ **Now Playing**: Playing: ${displayName}`);
                 command = PCancelable.fn<string, string>(() => streamLivestreamVideo(yturl, udpConn))(yturl);
             }
         } else if (link.includes('twitch.tv')) {
@@ -273,12 +295,12 @@ async function playLink(link: string, udpConn: MediaUdp, displayName?: string) {
             const twitchUrl = await getTwitchStreamUrl(link);
             if (twitchUrl) {
                 if (!displayName) displayName = `${twitchId}'s Twitch Stream`;
-                await sendEmbed(getCommandChannel(), "Now Playing", `Playing: ${displayName}`, "▶️");
+                await sendPlain(getCommandChannel(), `▶️ **Now Playing**: Playing: ${displayName}`);
                 command = PCancelable.fn<string, string>(() => streamLivestreamVideo(twitchUrl, udpConn))(twitchUrl);
             }
         } else {
             if (!displayName) displayName = "URL";
-            await sendEmbed(getCommandChannel(), "Now Playing", `Playing: ${displayName}`, "▶️");
+            await sendPlain(getCommandChannel(), `▶️ **Now Playing**: Playing: ${displayName}`);
             command = PCancelable.fn<string, string>(() => streamLivestreamVideo(link, udpConn))(link);
         }
         const res = await command;
@@ -290,19 +312,19 @@ async function playLink(link: string, udpConn: MediaUdp, displayName?: string) {
     } finally {
         udpConn.mediaConnection.setSpeaking(false);
         udpConn.mediaConnection.setVideoStatus(false);
-        await sendEmbed(getCommandChannel(), "Finished", "Finished playing video.", "⏹️");
+        await sendPlain(getCommandChannel(), "⏹️ **Finished**: Finished playing video.");
         await processQueue();
     }
 }
 
-// Function to play a local video file (modified to process the queue after finishing)
+// Play a local video file
 async function playVideo(video: string, udpConn: MediaUdp, title?: string) {
     logger.info("Started playing video");
     udpConn.mediaConnection.setSpeaking(true);
     udpConn.mediaConnection.setVideoStatus(true);
     try {
         if (title) {
-            await sendEmbed(getCommandChannel(), "Now Playing", `Playing: ${title}`, "▶️");
+            await sendPlain(getCommandChannel(), `▶️ **Now Playing**: Playing: ${title}`);
             streamer.client.user?.setActivity(status_watch(title) as ActivityOptions);
         }
         command = PCancelable.fn<string, string>(() => streamLivestreamVideo(video, udpConn))(video);
@@ -315,12 +337,12 @@ async function playVideo(video: string, udpConn: MediaUdp, title?: string) {
     } finally {
         udpConn.mediaConnection.setSpeaking(false);
         udpConn.mediaConnection.setVideoStatus(false);
-        await sendEmbed(getCommandChannel(), "Finished", "Finished playing video.", "⏹️");
+        await sendPlain(getCommandChannel(), "⏹️ **Finished**: Finished playing video.");
         await processQueue();
     }
 }
 
-// Helper to get the command channel (assumes the first channel in config.cmdChannelId)
+// Helper to get the command channel from config
 function getCommandChannel(): TextChannel {
     const channelId = Array.isArray(config.cmdChannelId) ? config.cmdChannelId[0] : config.cmdChannelId;
     return streamer.client.channels.cache.get(channelId.toString()) as TextChannel;
@@ -329,11 +351,9 @@ function getCommandChannel(): TextChannel {
 // ------------------
 // DOWNLOAD FUNCTION
 // ------------------
-
 async function downloadVideo(link: string, channel: TextChannel) {
     try {
         const info = await ytdl.getInfo(link);
-        // Remove illegal characters from title
         const title = info.videoDetails.title.replace(/[^\w\s]/gi, '');
         const fileName = `${title}_${Date.now()}.mp4`;
         const filePath = path.join(config.videosDir, fileName);
@@ -341,20 +361,19 @@ async function downloadVideo(link: string, channel: TextChannel) {
         const writeStream = fs.createWriteStream(filePath);
         videoStream.pipe(writeStream);
         writeStream.on('finish', async () => {
-            await sendEmbed(channel, "Download Complete", `Video downloaded as: \`${fileName}\``, "✅");
+            await sendPlain(channel, `✅ **Download Complete**: Video downloaded as: \`${fileName}\``);
         });
         writeStream.on('error', async (err) => {
-            await sendEmbed(channel, "Download Error", `Error downloading video: ${err}`, "❌");
+            await sendPlain(channel, `❌ **Download Error**: Error downloading video: ${err}`);
         });
     } catch (error) {
-        await sendEmbed(channel, "Download Error", "Failed to download video.", "❌");
+        await sendPlain(channel, "❌ **Download Error**: Failed to download video.");
     }
 }
 
 // ------------------
-// UTILITY FUNCTIONS FOR LINKS (from your original code)
+// UTILITY FUNCTIONS FOR LINKS
 // ------------------
-
 async function getTwitchStreamUrl(url: string): Promise<string | null> {
     try {
         if (url.includes('/videos/')) {
@@ -395,9 +414,8 @@ async function ytSearch(title: string): Promise<string[]> {
 }
 
 // ------------------
-// STATUS FUNCTIONS (unchanged mostly)
+// STATUS FUNCTIONS
 // ------------------
-
 const status_idle = () => {
     return new CustomStatus(new Client())
         .setEmoji('👑')
@@ -413,7 +431,6 @@ const status_watch = (name: string) => {
 // ------------------
 // CLEANUP FUNCTION
 // ------------------
-
 async function cleanupStreamStatus() {
     streamer.leaveVoice();
     streamer.client.user?.setActivity(status_idle() as ActivityOptions);
@@ -430,7 +447,6 @@ async function cleanupStreamStatus() {
 // ------------------
 // OPTIONAL: Run server if enabled in config
 // ------------------
-
 if (config.server_enabled) {
     import('./server.js');
 }
