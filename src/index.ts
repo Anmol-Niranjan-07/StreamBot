@@ -17,7 +17,7 @@ import https from 'https';
 const streamer = new Streamer(new Client());
 const youtube = new Youtube();
 
-// Stream options (unchanged)
+// Stream options
 const streamOpts: StreamOptions = {
     width: config.width,
     height: config.height,
@@ -32,11 +32,11 @@ const streamOpts: StreamOptions = {
     forceChacha20Encryption: false
 };
 
-// Ensure necessary directories exist
+// Ensure directories exist
 fs.mkdirSync(config.videosDir, { recursive: true });
 fs.mkdirSync(config.previewCacheDir, { recursive: true });
 
-// Local video list (for "random" command)
+// Read local video files (for "random" command)
 const videoFiles = fs.readdirSync(config.videosDir);
 let videos = videoFiles.map(file => {
     const fileName = path.parse(file).name;
@@ -44,7 +44,7 @@ let videos = videoFiles.map(file => {
 });
 logger.info(`Available videos:\n${videos.map(m => m.name).join('\n')}`);
 
-// Global stream status object
+// Global stream status – holds voice connection info
 const streamStatus = {
     joined: false,
     joinsucc: false,
@@ -56,14 +56,27 @@ const streamStatus = {
     }
 };
 
-// Global queues for remote video links
+// Global queues: working queue and original queue (for looping)
 let videoQueue: { uid: string, link: string }[] = [];
 let originalQueue: { uid: string, link: string }[] = [];
-let loopEnabled = false;        // When true, the originalQueue will be reloaded when working queue empties.
-let isPlayingQueue = false;       // Indicates the dedicated playback loop is running.
-let stopRequested = false;        // When true, stops playback.
+let loopEnabled = false;   // When true, if the working queue empties, it is refilled
+let isPlayingQueue = false;  // Indicates that the playback loop is running
+let stopRequested = false;   // When true, the playback loop will exit
 
-// Utility: Generate a UID (5-digit number + 3 uppercase letters)
+// Status functions now use the logged‑in client so that your custom status is applied.
+const status_idle = () => {
+    return new CustomStatus(streamer.client)
+        .setEmoji('👑')
+        .setState('Join Sinister Valley. Link in Bio!');
+};
+
+const status_watch = (name: string) => {
+    return new CustomStatus(streamer.client)
+        .setEmoji('🟣')
+        .setState(`Streaming Now!`);
+};
+
+// Utility: generate a UID (5-digit number + 3 uppercase letters)
 function generateUID(): string {
     const num = Math.floor(10000 + Math.random() * 90000).toString();
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -74,7 +87,7 @@ function generateUID(): string {
     return num + randLetters;
 }
 
-// Helper: Send plain text message (reply if Message; else send to channel)
+// Helper: send plain text message (reply if Message, otherwise send to channel)
 async function sendPlain(target: Message | TextChannel, content: string) {
     if (target instanceof Message) {
         await target.reply(content);
@@ -82,8 +95,6 @@ async function sendPlain(target: Message | TextChannel, content: string) {
         await target.send(content);
     }
 }
-
-// Specific helper functions
 async function sendError(message: Message, errorText: string) {
     await sendPlain(message, `❌ Error: ${errorText}`);
 }
@@ -109,7 +120,7 @@ async function sendFinishMessage() {
     }
 }
 
-// Pre-download function: Downloads remote video and returns local file path.
+// Pre-download function: downloads a remote video and returns its local file path.
 async function preDownloadVideo(link: string): Promise<string> {
     return new Promise(async (resolve, reject) => {
         try {
@@ -152,7 +163,7 @@ async function preDownloadVideo(link: string): Promise<string> {
     });
 }
 
-// Dedicated playback loop using a single voice connection
+// Instead of launching separate playback tasks for each video, use a dedicated loop.
 async function playQueue() {
     if (isPlayingQueue) return;
     isPlayingQueue = true;
@@ -181,14 +192,12 @@ async function playQueue() {
         }
         const next = videoQueue.shift();
         if (!next) continue;
-        // Only pre-download the next video if it's remote.
         if (next.link.startsWith("http")) {
             try {
                 const localPath = await preDownloadVideo(next.link);
                 next.link = localPath;
             } catch (err) {
                 logger.error("Error pre-downloading video:", err);
-                // Skip this video if download fails.
                 continue;
             }
         }
@@ -198,7 +207,6 @@ async function playQueue() {
         } catch (err) {
             logger.error("Error playing video:", err);
         }
-        // Wait a short delay before processing the next video.
         await new Promise(res => setTimeout(res, 1000));
     }
     await cleanupStreamStatus();
@@ -206,7 +214,7 @@ async function playQueue() {
     stopRequested = false;
 }
 
-
+// Play a video using an existing voice connection
 async function playVideoWithConnection(video: string, title: string, udpConn: MediaUdp) {
     udpConn.mediaConnection.setSpeaking(true);
     udpConn.mediaConnection.setVideoStatus(true);
@@ -228,13 +236,12 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
     }
 }
 
-// Command handler: listens to messages (including from self)
+// Command handler (listening to messages from self)
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (!args.length) return;
     const commandName = args.shift()!.toLowerCase();
-
     switch (commandName) {
         case 'add': {
             // Use join(" ") so that spaces are preserved.
@@ -291,13 +298,9 @@ streamer.client.on('messageCreate', async (message) => {
             break;
         }
         case 'stop': {
-            // Set flag to stop playback and clear queues.
             stopRequested = true;
             videoQueue = [];
             originalQueue = [];
-            if (typeof command !== "undefined") {
-                command.cancel();
-            }
             await cleanupStreamStatus();
             await sendPlain(message, "⏹️ Playback stopped.");
             break;
@@ -357,25 +360,27 @@ streamer.client.on('messageCreate', async (message) => {
     }
 });
 
-// Helper: Get the command channel from config
+// Helper: Get the command channel from config.
 function getCommandChannel(): TextChannel {
     const channelId = Array.isArray(config.cmdChannelId) ? config.cmdChannelId[0] : config.cmdChannelId;
     return streamer.client.channels.cache.get(channelId.toString()) as TextChannel;
 }
 
-// Cleanup function: Leaves voice and resets streamStatus.
+// Cleanup: Leave voice and reset streamStatus (retain channel info for reconnection)
 async function cleanupStreamStatus() {
     streamer.leaveVoice();
     streamer.client.user?.setActivity(status_idle() as ActivityOptions);
     streamStatus.joined = false;
     streamStatus.joinsucc = false;
     streamStatus.playing = false;
-    streamStatus.channelInfo = { guildId: "", channelId: "", cmdChannelId: "" };
+    streamStatus.channelInfo = {
+        guildId: config.guildId,
+        channelId: config.videoChannelId,
+        cmdChannelId: config.cmdChannelId
+    };
 }
 
-// ------------------
-// DOWNLOAD FUNCTION
-// ------------------
+// Download function: Downloads a remote video.
 async function downloadVideo(link: string, channel: TextChannel) {
     try {
         const info = await ytdl.getInfo(link);
@@ -396,9 +401,7 @@ async function downloadVideo(link: string, channel: TextChannel) {
     }
 }
 
-// ------------------
-// UTILITY FUNCTIONS FOR LINKS
-// ------------------
+// Utility functions for links
 async function getTwitchStreamUrl(url: string): Promise<string | null> {
     try {
         if (url.includes('/videos/')) {
@@ -421,33 +424,18 @@ async function getTwitchStreamUrl(url: string): Promise<string | null> {
         return null;
     }
 }
-
 async function getVideoUrl(videoUrl: string): Promise<string | null> {
     return await youtube.getVideoUrl(videoUrl);
 }
-
 async function ytPlayTitle(title: string): Promise<string | null> {
     return await youtube.searchAndPlay(title);
 }
-
 async function ytSearch(title: string): Promise<string[]> {
     return await youtube.search(title);
 }
 
-// ------------------
-// STATUS FUNCTIONS
-// ------------------
-const status_idle = () => {
-    return new CustomStatus(new Client())
-        .setEmoji('👑')
-        .setState('Join Sinister Valley. Link in Bio!');
-};
-
-const status_watch = (name: string) => {
-    return new CustomStatus(new Client())
-        .setEmoji('🟣')
-        .setState(`Streaming Now!`);
-};
+// Status functions (using streamer.client already defined above)
+// (status_idle and status_watch already defined)
 
 // ------------------
 // OPTIONAL: Run server if enabled in config
