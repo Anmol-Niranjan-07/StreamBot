@@ -77,9 +77,9 @@ async function sendEmbed(target: Message | TextChannel, title: string, descripti
         .setColor('#0099ff')
         .setTimestamp();
     if (target instanceof Message) {
-        await target.reply({ embeds: [embed] });
+        await target.reply({ content: " ", embeds: [embed] });
     } else {
-        await target.send({ embeds: [embed] });
+        await target.send({ content: " ", embeds: [embed] });
     }
 }
 
