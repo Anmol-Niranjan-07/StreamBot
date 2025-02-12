@@ -181,12 +181,14 @@ async function playQueue() {
         }
         const next = videoQueue.shift();
         if (!next) continue;
+        // Only pre-download the next video if it's remote.
         if (next.link.startsWith("http")) {
             try {
                 const localPath = await preDownloadVideo(next.link);
                 next.link = localPath;
             } catch (err) {
                 logger.error("Error pre-downloading video:", err);
+                // Skip this video if download fails.
                 continue;
             }
         }
@@ -196,12 +198,14 @@ async function playQueue() {
         } catch (err) {
             logger.error("Error playing video:", err);
         }
+        // Wait a short delay before processing the next video.
         await new Promise(res => setTimeout(res, 1000));
     }
     await cleanupStreamStatus();
     isPlayingQueue = false;
     stopRequested = false;
 }
+
 
 async function playVideoWithConnection(video: string, title: string, udpConn: MediaUdp) {
     udpConn.mediaConnection.setSpeaking(true);
