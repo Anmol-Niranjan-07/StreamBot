@@ -55,8 +55,13 @@ const streamStatus = {
     }
 };
 
-// Global queue for video links
+// Global queue for video links (working copy)
 let videoQueue: { uid: string, link: string }[] = [];
+// Original queue to remember items for looping
+let originalQueue: { uid: string, link: string }[] = [];
+
+// Loop flag – when true, the originalQueue will be reloaded when the working queue is empty.
+let loopEnabled = false;
 
 // Utility: generate a UID (5-digit number + 3 random uppercase letters)
 function generateUID(): string {
@@ -148,7 +153,7 @@ streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
     }
 });
 
-// Command handler – listens to messages (even from the bot itself)
+// Command handler – listens to messages (including from self)
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
 
@@ -158,23 +163,23 @@ streamer.client.on('messageCreate', async (message) => {
 
     switch (commandName) {
         case 'add': {
-            // Usage: <prefix>add <video_link>
-            const link = args[0];
+            // Now use args.join(" ") so that spaces are included in the link.
+            const link = args.join(" ");
             if (!link) {
                 await sendError(message, "Please provide a video link.");
                 return;
             }
             const uid = generateUID();
-            videoQueue.push({ uid, link });
+            const item = { uid, link };
+            videoQueue.push(item);
+            originalQueue.push(item);
             await sendSuccess(message, `Video added (UID: \`${uid}\`, Link: ${link})`);
-            // If nothing is playing, process the queue
             if (!streamStatus.playing) {
                 processQueue();
             }
             break;
         }
         case 'list': {
-            // Show current queue status
             if (videoQueue.length === 0) {
                 await sendInfo(message, "Queue Status", "The queue is empty.");
             } else {
@@ -184,23 +189,36 @@ streamer.client.on('messageCreate', async (message) => {
             break;
         }
         case 'remove': {
-            // Usage: <prefix>remove <uid>
             const uid = args[0];
             if (!uid) {
                 await sendError(message, "Please provide the UID of the video to remove.");
                 return;
             }
             const index = videoQueue.findIndex(item => item.uid === uid);
-            if (index === -1) {
+            const originalIndex = originalQueue.findIndex(item => item.uid === uid);
+            if (index === -1 || originalIndex === -1) {
                 await sendError(message, `No video found with UID \`${uid}\`.`);
             } else {
                 const removed = videoQueue.splice(index, 1)[0];
+                originalQueue.splice(originalIndex, 1);
                 await sendSuccess(message, `Removed video (UID: \`${removed.uid}\`, Link: ${removed.link})`);
             }
             break;
         }
+        case 'loop': {
+            const mode = args[0]?.toLowerCase();
+            if (mode === "on") {
+                loopEnabled = true;
+                await sendSuccess(message, "Loop mode enabled. The current queue will repeat continuously.");
+            } else if (mode === "off") {
+                loopEnabled = false;
+                await sendSuccess(message, "Loop mode disabled.");
+            } else {
+                await sendError(message, "Usage: `loop on` or `loop off`");
+            }
+            break;
+        }
         case 'random': {
-            // Play a random local video immediately
             const localVideoFiles = fs.readdirSync(config.videosDir);
             if (localVideoFiles.length === 0) {
                 await sendError(message, "No videos found in the local videos folder.");
@@ -214,15 +232,13 @@ streamer.client.on('messageCreate', async (message) => {
             const udpConn = await streamer.createStream(streamOpts);
             streamStatus.joined = true;
             streamStatus.playing = true;
-            // Detach the streaming so new commands can be processed concurrently
             setImmediate(() => {
                 playVideo(filePath, udpConn, file).catch(err => logger.error(err));
             });
             break;
         }
         case 'download': {
-            // Usage: <prefix>download <video_link>
-            const link = args[0];
+            const link = args.join(" ");
             if (!link) {
                 await sendError(message, "Please provide a video link to download.");
                 return;
@@ -235,11 +251,13 @@ streamer.client.on('messageCreate', async (message) => {
             const helpText = [
                 '📽 Available Commands:',
                 '',
-                `\`${config.prefix}add <link>\` – Add a video link to the queue.`,
+                `\`${config.prefix}add <link>\` – Add a video link to the queue. (Now supports links with spaces)`,
                 `\`${config.prefix}list\` – Show the current queue (with UID for each item).`,
                 `\`${config.prefix}remove <uid>\` – Remove a video from the queue by UID.`,
                 `\`${config.prefix}random\` – Play a random local video.`,
                 `\`${config.prefix}download <link>\` – Download a video to the videos folder.`,
+                `\`${config.prefix}loop on\` – Enable loop mode (repeats the current queue).`,
+                `\`${config.prefix}loop off\` – Disable loop mode.`,
                 `\`${config.prefix}help\` – Show this help message.`
             ].join('\n');
             await sendPlain(message, helpText);
@@ -257,8 +275,11 @@ streamer.client.on('messageCreate', async (message) => {
 // ------------------
 let command: PCancelable<string> | undefined;
 
-// Process the next video in the queue (if available)
 async function processQueue() {
+    if (videoQueue.length === 0 && loopEnabled && originalQueue.length > 0) {
+        // If looping is enabled and the working queue is empty, refill it with a copy of the original queue.
+        videoQueue = originalQueue.slice(0);
+    }
     if (videoQueue.length > 0) {
         const next = videoQueue.shift()!;
         if (!streamStatus.joined) {
@@ -267,7 +288,6 @@ async function processQueue() {
         const udpConn = await streamer.createStream(streamOpts);
         streamStatus.joined = true;
         streamStatus.playing = true;
-        // Detach the playback function so it runs in the background
         setImmediate(() => {
             playLink(next.link, udpConn, `Queue item [${next.uid}]`).catch(err => logger.error(err));
         });
