@@ -36,7 +36,7 @@ const streamOpts: StreamOptions = {
 fs.mkdirSync(config.videosDir, { recursive: true });
 fs.mkdirSync(config.previewCacheDir, { recursive: true });
 
-// Read local video files (for the "random" command)
+// (Local videos list for the "random" command)
 const videoFiles = fs.readdirSync(config.videosDir);
 let videos = videoFiles.map(file => {
     const fileName = path.parse(file).name;
@@ -59,9 +59,10 @@ const streamStatus = {
 // Global queues: working queue and original queue (for looping)
 let videoQueue: { uid: string, link: string }[] = [];
 let originalQueue: { uid: string, link: string }[] = [];
-let loopEnabled = false; // If true, once the working queue is empty, it will be refilled from originalQueue
+let loopEnabled = false; // When true, if the working queue empties, refill it
+let isPlayingQueue = false; // Indicates that the queue loop is running
 
-// Utility: generate a UID (5-digit number + 3 random uppercase letters)
+// Utility: generate a UID (5-digit number + 3 uppercase letters)
 function generateUID(): string {
     const num = Math.floor(10000 + Math.random() * 90000).toString();
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -72,7 +73,7 @@ function generateUID(): string {
     return num + randLetters;
 }
 
-// Helper: Send a plain text message
+// Helper: send plain text message
 async function sendPlain(target: Message | TextChannel, content: string) {
     if (target instanceof Message) {
         await target.reply(content);
@@ -85,26 +86,21 @@ async function sendPlain(target: Message | TextChannel, content: string) {
 async function sendError(message: Message, errorText: string) {
     await sendPlain(message, `❌ Error: ${errorText}`);
 }
-
 async function sendSuccess(message: Message, text: string) {
     await sendPlain(message, `✅ Success: ${text}`);
 }
-
 async function sendInfo(message: Message, title: string, description: string) {
     await sendPlain(message, `ℹ️ ${title}: ${description}`);
 }
-
 async function sendPlaying(message: Message, title: string) {
     await sendPlain(message, `▶️ Now Playing: ${title}`);
 }
-
 async function sendList(message: Message, items: string[], type?: string) {
-    let header = type === "ytsearch" ? "📋 Search Results:" :
-                 type === "refresh" ? "📋 Video list refreshed:" :
-                 "📋 Local Videos List:";
+    const header = type === "ytsearch" ? "📋 Search Results:" :
+                   type === "refresh" ? "📋 Video list refreshed:" :
+                   "📋 Local Videos List:";
     await sendPlain(message, `${header}\n${items.join('\n')}`);
 }
-
 async function sendFinishMessage() {
     const channel = streamer.client.channels.cache.get(config.cmdChannelId.toString()) as TextChannel;
     if (channel) {
@@ -112,7 +108,7 @@ async function sendFinishMessage() {
     }
 }
 
-// Pre-download function: Downloads a remote video and returns its local file path.
+// Pre-download function: downloads a remote video and returns the local file path.
 async function preDownloadVideo(link: string): Promise<string> {
     return new Promise(async (resolve, reject) => {
         try {
@@ -155,41 +151,89 @@ async function preDownloadVideo(link: string): Promise<string> {
     });
 }
 
-// Ready event
-streamer.client.on("ready", async () => {
-    if (streamer.client.user) {
-        logger.info(`${streamer.client.user.tag} is ready`);
-        streamer.client.user.setActivity(status_idle() as ActivityOptions);
-    }
-});
-
-// Voice state update: Maintain streamStatus
-streamer.client.on('voiceStateUpdate', async (oldState, newState) => {
-    if (oldState.member?.user.id === streamer.client.user?.id && oldState.channelId && !newState.channelId) {
-        streamStatus.joined = false;
-        streamStatus.joinsucc = false;
-        streamStatus.playing = false;
-        streamStatus.channelInfo = { guildId: config.guildId, channelId: config.videoChannelId, cmdChannelId: config.cmdChannelId };
-        streamer.client.user?.setActivity(status_idle() as ActivityOptions);
-    }
-    if (newState.member?.user.id === streamer.client.user?.id && newState.channelId && !oldState.channelId) {
-        streamStatus.joined = true;
-        if (newState.guild.id === streamStatus.channelInfo.guildId && newState.channelId === streamStatus.channelInfo.channelId) {
-            streamStatus.joinsucc = true;
+// Instead of launching separate playback tasks, we use one dedicated async loop.
+async function playQueue() {
+    if (isPlayingQueue) return;
+    isPlayingQueue = true;
+    let udpConn: MediaUdp;
+    try {
+        // Ensure we have a voice connection. Re-use one if available.
+        if (!streamStatus.joined) {
+            await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
+            udpConn = await streamer.createStream(streamOpts);
+            streamStatus.joined = true;
+        } else {
+            udpConn = await streamer.createStream(streamOpts);
         }
+    } catch (err) {
+        logger.error("Error joining voice channel:", err);
+        isPlayingQueue = false;
+        return;
     }
-});
+    while (true) {
+        if (videoQueue.length === 0) {
+            if (loopEnabled && originalQueue.length > 0) {
+                videoQueue = originalQueue.slice();
+            } else {
+                break;
+            }
+        }
+        const next = videoQueue.shift();
+        if (!next) continue;
+        // If remote, pre-download it.
+        if (next.link.startsWith("http")) {
+            try {
+                const localPath = await preDownloadVideo(next.link);
+                next.link = localPath;
+            } catch (err) {
+                logger.error("Error pre-downloading video:", err);
+                continue; // Skip this video if download fails.
+            }
+        }
+        try {
+            logger.info(`Playing next video: ${next.link}`);
+            await playVideoWithConnection(next.link, `Queue item [${next.uid}]`, udpConn);
+        } catch (err) {
+            logger.error("Error playing video:", err);
+        }
+        // Small delay before next video
+        await new Promise(res => setTimeout(res, 1000));
+    }
+    await cleanupStreamStatus();
+    isPlayingQueue = false;
+}
 
-// Command handler (listens to messages from self)
+async function playVideoWithConnection(video: string, title: string, udpConn: MediaUdp) {
+    udpConn.mediaConnection.setSpeaking(true);
+    udpConn.mediaConnection.setVideoStatus(true);
+    if (title) {
+        await sendPlain(getCommandChannel(), `▶️ Now Playing: ${title}`);
+        streamer.client.user?.setActivity(status_watch(title) as ActivityOptions);
+    }
+    try {
+        // Directly await the streaming function.
+        const res = await streamLivestreamVideo(video, udpConn);
+        logger.info(`Finished playing video: ${res}`);
+    } catch (error) {
+        if (!(error instanceof CancelError)) {
+            logger.error("Error occurred while playing video:", error);
+        }
+    } finally {
+        udpConn.mediaConnection.setSpeaking(false);
+        udpConn.mediaConnection.setVideoStatus(false);
+        await sendPlain(getCommandChannel(), "⏹️ Finished playing video.");
+    }
+}
+
+// Command handler: listens to messages (even from self)
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (!args.length) return;
     const commandName = args.shift()!.toLowerCase();
-
     switch (commandName) {
         case 'add': {
-            // Use args.join(" ") so that links with spaces are preserved.
+            // Use join so spaces are preserved.
             const link = args.join(" ");
             if (!link) {
                 await sendError(message, "Please provide a video link.");
@@ -200,7 +244,7 @@ streamer.client.on('messageCreate', async (message) => {
             videoQueue.push(item);
             originalQueue.push(item);
             await sendSuccess(message, `Video added (UID: \`${uid}\`, Link: ${link})`);
-            if (!streamStatus.playing) processQueue().catch(err => logger.error(err));
+            if (!isPlayingQueue) playQueue().catch(err => logger.error(err));
             break;
         }
         case 'list': {
@@ -252,12 +296,16 @@ streamer.client.on('messageCreate', async (message) => {
             const file = localVideoFiles[randomIndex];
             const filePath = path.join(config.videosDir, file);
             await sendPlain(message, `▶️ Now Playing: Random video \`${file}\``);
-            await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
+            // Join voice channel if not already connected.
+            if (!streamStatus.joined) {
+                await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
+            }
             const udpConn = await streamer.createStream(streamOpts);
             streamStatus.joined = true;
             streamStatus.playing = true;
+            // Play using our loop function.
             setImmediate(() => {
-                playVideo(filePath, udpConn, file).catch(err => logger.error(err));
+                playVideoWithConnection(filePath, file, udpConn).catch(err => logger.error(err));
             });
             break;
         }
@@ -295,70 +343,18 @@ streamer.client.on('messageCreate', async (message) => {
 });
 
 // ------------------
-// QUEUE & PLAYBACK FUNCTIONS
+// CLEANUP FUNCTION
 // ------------------
-let command: PCancelable<string> | undefined;
-
-async function processQueue() {
-    if (videoQueue.length === 0 && loopEnabled && originalQueue.length > 0) {
-        videoQueue = originalQueue.slice(0);
-    }
-    if (videoQueue.length > 0) {
-        const next = videoQueue.shift()!;
-        // If the link is remote, pre-download it.
-        if (next.link.startsWith("http")) {
-            try {
-                const localPath = await preDownloadVideo(next.link);
-                next.link = localPath;
-            } catch (err) {
-                logger.error("Error pre-downloading video:", err);
-                // If pre-download fails, skip to the next video.
-                return processQueue();
-            }
-        }
-        if (!streamStatus.joined) {
-            await streamer.joinVoice(config.guildId, config.videoChannelId, streamOpts);
-        }
-        const udpConn = await streamer.createStream(streamOpts);
-        streamStatus.joined = true;
-        streamStatus.playing = true;
-        setImmediate(() => {
-            playVideo(next.link, udpConn, `Queue item [${next.uid}]`).catch(err => logger.error(err));
-        });
-    } else {
-        await cleanupStreamStatus();
-    }
+async function cleanupStreamStatus() {
+    streamer.leaveVoice();
+    streamer.client.user?.setActivity(status_idle() as ActivityOptions);
+    streamStatus.joined = false;
+    streamStatus.joinsucc = false;
+    streamStatus.playing = false;
+    streamStatus.channelInfo = { guildId: "", channelId: "", cmdChannelId: "" };
 }
 
-// Play a local video file
-async function playVideo(video: string, udpConn: MediaUdp, title?: string) {
-    logger.info("Started playing video");
-    udpConn.mediaConnection.setSpeaking(true);
-    udpConn.mediaConnection.setVideoStatus(true);
-    try {
-        if (title) {
-            sendPlain(getCommandChannel(), `▶️ Now Playing: ${title}`);
-            streamer.client.user?.setActivity(status_watch(title) as ActivityOptions);
-        }
-        command = PCancelable.fn<string, string>(() => streamLivestreamVideo(video, udpConn))(video);
-        const res = await command;
-        logger.info(`Finished playing video: ${res}`);
-    } catch (error) {
-        if (!(error instanceof CancelError)) {
-            logger.error("Error occurred while playing video:", error);
-        }
-    } finally {
-        udpConn.mediaConnection.setSpeaking(false);
-        udpConn.mediaConnection.setVideoStatus(false);
-        sendPlain(getCommandChannel(), "⏹️ Finished playing video.");
-        // Use a short delay before processing the next video.
-        setTimeout(() => {
-            processQueue().catch(err => logger.error(err));
-        }, 1000);
-    }
-}
-
-// Helper to get the command channel
+// Helper: get the command channel from config
 function getCommandChannel(): TextChannel {
     const channelId = Array.isArray(config.cmdChannelId) ? config.cmdChannelId[0] : config.cmdChannelId;
     return streamer.client.channels.cache.get(channelId.toString()) as TextChannel;
@@ -439,18 +435,6 @@ const status_watch = (name: string) => {
         .setEmoji('🟣')
         .setState(`Streaming Now!`);
 };
-
-// ------------------
-// CLEANUP FUNCTION
-// ------------------
-async function cleanupStreamStatus() {
-    streamer.leaveVoice();
-    streamer.client.user?.setActivity(status_idle() as ActivityOptions);
-    streamStatus.joined = false;
-    streamStatus.joinsucc = false;
-    streamStatus.playing = false;
-    streamStatus.channelInfo = { guildId: "", channelId: "", cmdChannelId: "" };
-}
 
 // ------------------
 // OPTIONAL: Run server if enabled in config
