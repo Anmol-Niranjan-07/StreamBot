@@ -239,6 +239,7 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
 // Command handler (listening to messages from self)
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
+    if (message.channel.id != config.cmdChannelId) return;
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (!args.length) return;
     const commandName = args.shift()!.toLowerCase();
