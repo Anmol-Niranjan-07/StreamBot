@@ -369,17 +369,20 @@ function getCommandChannel(): TextChannel {
 
 // Cleanup: Leave voice and reset streamStatus (retain channel info for reconnection)
 async function cleanupStreamStatus() {
-    streamer.leaveVoice();
+    await streamer.leaveVoice(); // ensure disconnection is complete
     streamer.client.user?.setActivity(status_idle() as ActivityOptions);
     streamStatus.joined = false;
     streamStatus.joinsucc = false;
     streamStatus.playing = false;
+    // Optionally, add a brief delay to ensure cleanup completes
+    await new Promise(res => setTimeout(res, 500));
     streamStatus.channelInfo = {
         guildId: config.guildId,
         channelId: config.videoChannelId,
         cmdChannelId: config.cmdChannelId
     };
 }
+
 
 // Download function: Downloads a remote video.
 async function downloadVideo(link: string, channel: TextChannel) {
