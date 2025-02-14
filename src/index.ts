@@ -254,6 +254,7 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
     if (message.channel.id != config.cmdChannelId) return;
+    // Split using spaces; for batch, we will further split by newline
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (!args.length) return;
     const commandName = args.shift()!.toLowerCase();
@@ -270,6 +271,24 @@ streamer.client.on('messageCreate', async (message) => {
             videoQueue.push(item);
             originalQueue.push(item);
             await sendSuccess(message, `Video added (UID: \`${uid}\`, Link: ${link})`);
+            if (!isPlayingQueue) playQueue().catch(err => logger.error(err));
+            break;
+        }
+        case 'batch': {
+            // Get the remainder of the message (supports multiple lines)
+            const rest = message.content.slice(config.prefix!.length + commandName.length).trim();
+            const links = rest.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+            if (links.length === 0) {
+                await sendError(message, "No links found. Please provide multiple links separated by newlines.");
+                return;
+            }
+            for (const link of links) {
+                const uid = generateUID();
+                const item = { uid, link };
+                videoQueue.push(item);
+                originalQueue.push(item);
+            }
+            await sendSuccess(message, `${links.length} videos added to the queue.`);
             if (!isPlayingQueue) playQueue().catch(err => logger.error(err));
             break;
         }
@@ -360,6 +379,7 @@ streamer.client.on('messageCreate', async (message) => {
                 '📽 Available Commands:',
                 '',
                 `\`${config.prefix}add <link>\` – Add a video link to the queue (supports spaces).`,
+                `\`${config.prefix}batch\` – Add multiple video links at once (each link on a new line).`,
                 `\`${config.prefix}list\` – Show the current queue (with UID for each item).`,
                 `\`${config.prefix}remove <uid>\` – Remove a video from the queue by UID.`,
                 `\`${config.prefix}random\` – Play a random local video.`,
