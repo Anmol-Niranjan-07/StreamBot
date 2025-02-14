@@ -63,6 +63,9 @@ let loopEnabled = false;   // When true, if the working queue empties, it is ref
 let isPlayingQueue = false;  // Indicates that the playback loop is running
 let stopRequested = false;   // When true, the playback loop will exit
 
+// Global reference to current playback (for cancellation)
+let currentPlayback: PCancelable<any> | null = null;
+
 // Status functions now use the logged‑in client so that your custom status is applied.
 const status_idle = () => {
     return new CustomStatus(streamer.client)
@@ -201,6 +204,7 @@ async function playQueue() {
                 continue;
             }
         }
+        if (stopRequested) break; // Check one more time before playing
         try {
             logger.info(`Playing next video: ${next.link}`);
             await playVideoWithConnection(next.link, `Queue item [${next.uid}]`, udpConn);
@@ -214,7 +218,7 @@ async function playQueue() {
     stopRequested = false;
 }
 
-// Play a video using an existing voice connection
+// Play a video using an existing voice connection with cancelable playback
 async function playVideoWithConnection(video: string, title: string, udpConn: MediaUdp) {
     udpConn.mediaConnection.setSpeaking(true);
     udpConn.mediaConnection.setVideoStatus(true);
@@ -223,7 +227,16 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
         streamer.client.user?.setActivity(status_watch(title) as ActivityOptions);
     }
     try {
-        const res = await streamLivestreamVideo(video, udpConn);
+        currentPlayback = new PCancelable(async (resolve, reject, onCancel) => {
+            const streamPromise = streamLivestreamVideo(video, udpConn);
+            onCancel(() => {
+                // Cancel the streaming promise
+                reject(new CancelError('Playback canceled'));
+            });
+            const result = await streamPromise;
+            resolve(result);
+        });
+        const res = await currentPlayback;
         logger.info(`Finished playing video: ${res}`);
     } catch (error) {
         if (!(error instanceof CancelError)) {
@@ -233,6 +246,7 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
         udpConn.mediaConnection.setSpeaking(false);
         udpConn.mediaConnection.setVideoStatus(false);
         await sendPlain(getCommandChannel(), "⏹️ Finished playing video.");
+        currentPlayback = null;
     }
 }
 
@@ -300,6 +314,10 @@ streamer.client.on('messageCreate', async (message) => {
         }
         case 'stop': {
             stopRequested = true;
+            // Cancel any ongoing playback if exists
+            if (currentPlayback) {
+                currentPlayback.cancel();
+            }
             videoQueue = [];
             originalQueue = [];
             await cleanupStreamStatus();
@@ -369,12 +387,12 @@ function getCommandChannel(): TextChannel {
 
 // Cleanup: Leave voice and reset streamStatus (retain channel info for reconnection)
 async function cleanupStreamStatus() {
-    await streamer.leaveVoice(); // ensure disconnection is complete
+    await streamer.leaveVoice();
     streamer.client.user?.setActivity(status_idle() as ActivityOptions);
     streamStatus.joined = false;
     streamStatus.joinsucc = false;
     streamStatus.playing = false;
-    // Optionally, add a brief delay to ensure cleanup completes
+    // Brief delay to ensure Discord processes the disconnect
     await new Promise(res => setTimeout(res, 500));
     streamStatus.channelInfo = {
         guildId: config.guildId,
@@ -382,7 +400,6 @@ async function cleanupStreamStatus() {
         cmdChannelId: config.cmdChannelId
     };
 }
-
 
 // Download function: Downloads a remote video.
 async function downloadVideo(link: string, channel: TextChannel) {
@@ -437,9 +454,6 @@ async function ytPlayTitle(title: string): Promise<string | null> {
 async function ytSearch(title: string): Promise<string[]> {
     return await youtube.search(title);
 }
-
-// Status functions (using streamer.client already defined above)
-// (status_idle and status_watch already defined)
 
 // ------------------
 // OPTIONAL: Run server if enabled in config
