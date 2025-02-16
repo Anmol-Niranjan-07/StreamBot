@@ -245,12 +245,17 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
     }
     try {
         currentPlayback = new PCancelable(async (resolve, reject, onCancel) => {
-            const streamPromise = streamLivestreamVideo(video, udpConn);
             onCancel(() => {
                 reject(new CancelError('Playback canceled'));
             });
-            const result = await streamPromise;
-            resolve(result);
+            try {
+                const result = await streamLivestreamVideo(video, udpConn);
+                resolve(result);
+            } catch (err) {
+                logger.error("Error occurred while streaming video:", err);
+                // Resolve so that the errored video is skipped without disconnecting
+                resolve("error skipped");
+            }
         });
         const res = await currentPlayback;
         logger.info(`Finished playing video: ${res}`);
