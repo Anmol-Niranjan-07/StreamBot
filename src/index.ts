@@ -123,6 +123,23 @@ async function sendFinishMessage() {
     }
 }
 
+// Helper: Reads text from an attachment URL.
+async function readAttachment(url: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let data = "";
+        https.get(url, (res) => {
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                resolve(data);
+            });
+        }).on('error', (err) => {
+            reject(err);
+        });
+    });
+}
+
 // Pre-download function: downloads a remote video and returns its local file path.
 async function preDownloadVideo(link: string): Promise<string> {
     return new Promise(async (resolve, reject) => {
@@ -230,7 +247,6 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
         currentPlayback = new PCancelable(async (resolve, reject, onCancel) => {
             const streamPromise = streamLivestreamVideo(video, udpConn);
             onCancel(() => {
-                // Cancel the streaming promise
                 reject(new CancelError('Playback canceled'));
             });
             const result = await streamPromise;
@@ -254,7 +270,6 @@ async function playVideoWithConnection(video: string, title: string, udpConn: Me
 streamer.client.on('messageCreate', async (message) => {
     if (!message.content.startsWith(config.prefix!)) return;
     if (message.channel.id != config.cmdChannelId) return;
-    // Split using spaces; for batch, we will further split by newline
     const args = message.content.slice(config.prefix!.length).trim().split(/ +/);
     if (!args.length) return;
     const commandName = args.shift()!.toLowerCase();
@@ -275,9 +290,29 @@ streamer.client.on('messageCreate', async (message) => {
             break;
         }
         case 'batch': {
-            // Get the remainder of the message (supports multiple lines)
-            const rest = message.content.slice(config.prefix!.length + commandName.length).trim();
-            const links = rest.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
+            // Check if there's an attachment. If so, read its text content.
+            let rawText = "";
+            if (message.attachments.size > 0) {
+                const attachment = message.attachments.find(att =>
+                    (att.name && att.name.endsWith('.txt')) ||
+                    (att.contentType && att.contentType.includes("text"))
+                );
+                if (attachment && attachment.url) {
+                    try {
+                        rawText = await readAttachment(attachment.url);
+                    } catch (err) {
+                        await sendError(message, "Failed to read the attachment.");
+                        return;
+                    }
+                } else {
+                    await sendError(message, "No valid text attachment found.");
+                    return;
+                }
+            } else {
+                // Otherwise, use the remaining message content after the command.
+                rawText = message.content.slice(config.prefix!.length + commandName.length).trim();
+            }
+            const links = rawText.split(/\r?\n/).map(line => line.trim()).filter(line => line.length > 0);
             if (links.length === 0) {
                 await sendError(message, "No links found. Please provide multiple links separated by newlines.");
                 return;
@@ -333,7 +368,6 @@ streamer.client.on('messageCreate', async (message) => {
         }
         case 'stop': {
             stopRequested = true;
-            // Cancel any ongoing playback if exists
             if (currentPlayback) {
                 currentPlayback.cancel();
             }
@@ -379,7 +413,7 @@ streamer.client.on('messageCreate', async (message) => {
                 '📽 Available Commands:',
                 '',
                 `\`${config.prefix}add <link>\` – Add a video link to the queue (supports spaces).`,
-                `\`${config.prefix}batch\` – Add multiple video links at once (each link on a new line).`,
+                `\`${config.prefix}batch\` – Add multiple video links at once (each link on a new line, or as a text attachment).`,
                 `\`${config.prefix}list\` – Show the current queue (with UID for each item).`,
                 `\`${config.prefix}remove <uid>\` – Remove a video from the queue by UID.`,
                 `\`${config.prefix}random\` – Play a random local video.`,
