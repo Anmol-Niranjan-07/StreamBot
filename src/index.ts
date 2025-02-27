@@ -70,13 +70,13 @@ let currentPlayback: PCancelable<any> | null = null;
 const status_idle = () => {
     return new CustomStatus(streamer.client)
         .setEmoji('👑')
-        .setState('Join Sinister Valley. Link in Bio!');
+        .setState('Free APM Service | Join Portal');
 };
 
 const status_watch = (name: string) => {
     return new CustomStatus(streamer.client)
-        .setEmoji('🟣')
-        .setState(`Streaming Now!`);
+        .setEmoji('👑')
+        .setState(`Free APM Service | Join Portal`);
 };
 
 // Utility: generate a UID (5-digit number + 3 uppercase letters)
